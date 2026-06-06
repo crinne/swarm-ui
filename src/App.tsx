@@ -132,6 +132,17 @@ export default function App() {
   useEffect(() => {
     const map = mapObj.current
     if (!map) return
+    const liveDroneIds = new Set(drones.map(drone => drone.id))
+    markers.current.forEach((marker, id) => {
+      if (!liveDroneIds.has(id)) {
+        marker.remove()
+        markers.current.delete(id)
+        altHistory.current.delete(id)
+        if (selected === id) {
+          setSelected(null)
+        }
+      }
+    })
     drones.forEach(drone => {
       const { lat, lng } = nedToLatLng(drone.x, drone.y)
       if (!markers.current.has(drone.id)) {
