@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+.drone-marker {
+  color: #00aaff;
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+  width: 40px;
+  height: 40px;
+}
+
+.drone-heading-line {
+  position: absolute;
+  top: 1px;
+  left: 18px;
+  width: 4px;
+  height: 17px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 80%),
+    0 0 6px currentColor;
+}
+
+.drone-body {
+  position: absolute;
+  top: 12px;
+  left: 10px;
+  width: 0;
+  height: 0;
+  border-right: 10px solid transparent;
+  border-bottom: 18px solid currentColor;
+  border-left: 10px solid transparent;
+  filter:
+    drop-shadow(0 0 1px #000)
+    drop-shadow(0 0 5px currentColor);
+}
