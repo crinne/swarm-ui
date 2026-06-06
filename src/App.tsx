@@ -3,9 +3,9 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { apiUrl, spawnDrone } from './api'
 
-// KrattWorks HQ — Tallinn as origin
 const ORIGIN_LAT = 59.4370
 const ORIGIN_LNG = 24.7536
+const ALT_BUFFER_SIZE = 60
 
 interface Drone {
   id: number
@@ -29,115 +29,133 @@ function modeLabel(mode: number) {
   return `MODE_${mode}`
 }
 
+function isArmed(mode: number) {
+  return mode === 0xD8 || mode === 0xBC
+}
+
+function batteryColor(pct: number) {
+  if (pct > 50) return '#22c55e'
+  if (pct > 20) return '#eab308'
+  return '#ef4444'
+}
+
+function HeadingArrow({ heading }: { heading: number }) {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" style={{ flexShrink: 0 }}>
+      <circle cx="10" cy="10" r="9" stroke="#374151" strokeWidth="1" fill="none" />
+      <g transform={`rotate(${heading} 10 10)`}>
+        <polygon points="10,2 7,14 10,12 13,14" fill="#3b82f6" />
+      </g>
+    </svg>
+  )
+}
+
+function Sparkline({ data }: { data: number[] }) {
+  if (data.length < 2) return <div style={{ height: 32 }} />
+  const min = Math.min(...data)
+  const max = Math.max(...data)
+  const range = max - min || 1
+  const W = 220
+  const H = 32
+  const pad = 2
+  const pts = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * W
+    const y = H - pad - ((v - min) / range) * (H - pad * 2)
+    return `${x},${y}`
+  }).join(' ')
+  return (
+    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+      <polygon points={`0,${H} ${pts} ${W},${H}`} fill="#3b82f6" fillOpacity="0.15" />
+      <polyline points={pts} stroke="#3b82f6" strokeWidth="1.5" fill="none" />
+    </svg>
+  )
+}
+
 export default function App() {
   const mapRef     = useRef<HTMLDivElement>(null)
   const mapObj     = useRef<maplibregl.Map | null>(null)
   const markers    = useRef<Map<number, maplibregl.Marker>>(new Map())
+  const altHistory = useRef<Map<number, number[]>>(new Map())
   const [drones, setDrones] = useState<Drone[]>([])
   const [selected, setSelected] = useState<number | null>(null)
   const [spawnStatus, setSpawnStatus] = useState<string | null>(null)
-// 1. init map ONCE
-useEffect(() => {
+
+  useEffect(() => {
     if (!mapRef.current) return
     const key = import.meta.env.VITE_MAPTILER_KEY
     const map = new maplibregl.Map({
       container: mapRef.current,
-      style: `https://api.maptiler.com/maps/outdoor-v2/style.json?key=${key}`,
+      style: `https://api.maptiler.com/maps/dataviz-dark/style.json?key=${key}`,
       center: [ORIGIN_LNG, ORIGIN_LAT],
       zoom: 14,
     })
     mapObj.current = map
-    return () => {
-      map.remove()
-    }
-}, []) // ← empty deps, runs once
+    return () => { map.remove() }
+  }, [])
 
-// 2. click handler — uses ref for selected to avoid recreating map
-const selectedRef = useRef<number | null>(null)
+  const selectedRef = useRef<number | null>(null)
+  useEffect(() => { selectedRef.current = selected }, [selected])
 
-useEffect(() => {
-  selectedRef.current = selected
-}, [selected])
-
-useEffect(() => {
+  useEffect(() => {
     const map = mapObj.current
     if (!map) return
-    
     const handleClick = (e: maplibregl.MapMouseEvent) => {
       if (selectedRef.current === null) return
       const { lat, lng } = e.lngLat
-      const x = (lng - ORIGIN_LNG) * 111320 *
-                Math.cos(ORIGIN_LAT * Math.PI / 180)
+      const x = (lng - ORIGIN_LNG) * 111320 * Math.cos(ORIGIN_LAT * Math.PI / 180)
       const y = (lat - ORIGIN_LAT) * 111320
-
       fetch(apiUrl('/goto'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          id: selectedRef.current, x, y, z: 10 
-        })
+        body: JSON.stringify({ id: selectedRef.current, x, y, z: 10 }),
       })
     }
-
     map.on('click', handleClick)
-    return () => {
-      map.off('click', handleClick)
-    }
-}, []) // ← empty deps too
+    return () => { map.off('click', handleClick) }
+  }, [])
 
-  // SSE telemetry
   useEffect(() => {
     const es = new EventSource(apiUrl('/telemetry'))
     es.onmessage = (e) => {
       const data = JSON.parse(e.data)
+      data.drones.forEach((d: Drone) => {
+        const hist = altHistory.current.get(d.id) ?? []
+        hist.push(d.z)
+        if (hist.length > ALT_BUFFER_SIZE) hist.shift()
+        altHistory.current.set(d.id, hist)
+      })
       setDrones(data.drones)
     }
     return () => es.close()
   }, [])
 
-  // update markers
   useEffect(() => {
     const map = mapObj.current
     if (!map) return
-
     drones.forEach(drone => {
       const { lat, lng } = nedToLatLng(drone.x, drone.y)
-
       if (!markers.current.has(drone.id)) {
-        // create marker
         const el = document.createElement('div')
         el.className = 'drone-marker'
         el.innerHTML = `
           <span class="drone-heading-line" aria-hidden="true"></span>
           <span class="drone-body" aria-hidden="true"></span>
         `
-        el.style.cssText = `
-          color: ${drone.id === selected ? '#00ff00' : '#00aaff'};
-          cursor: pointer;
-        `
+        el.style.cssText = `color: ${drone.id === selected ? '#22c55e' : '#3b82f6'}; cursor: pointer;`
         el.addEventListener('click', (ev) => {
           ev.stopPropagation()
           setSelected(drone.id)
         })
-
-        const marker = new maplibregl.Marker({
-          element: el,
-          rotation: drone.heading,
-        })
+        const marker = new maplibregl.Marker({ element: el, rotation: drone.heading })
           .setLngLat([lng, lat])
-          .setPopup(new maplibregl.Popup().setHTML(
-            `<b>Drone ${drone.id}</b>`
-          ))
+          .setPopup(new maplibregl.Popup().setHTML(`<b>Drone ${drone.id}</b>`))
           .addTo(map)
-
         markers.current.set(drone.id, marker)
       } else {
-        // update position and rotation
         const marker = markers.current.get(drone.id)!
         marker.setLngLat([lng, lat])
         marker.setRotation(drone.heading)
-        const el = marker.getElement()
-        el.style.color = drone.id === selected ? '#00ff00' : '#00aaff'
+        marker.getElement().style.color = drone.id === selected ? '#22c55e' : '#3b82f6'
       }
     })
   }, [drones, selected])
@@ -145,32 +163,38 @@ useEffect(() => {
   const handleSpawn = async () => {
     const password = window.prompt('Spawn password')
     if (!password) return
-
     setSpawnStatus('Spawning drone...')
     try {
       const result = await spawnDrone(password)
       setSpawnStatus(`Drone ${result.id} spawned`)
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Spawn failed'
-      setSpawnStatus(message)
+      setSpawnStatus(err instanceof Error ? err.message : 'Spawn failed')
     }
   }
 
   return (
-    <div className="flex h-screen bg-gray-900 text-white">
-      {/* map */}
-      <div ref={mapRef} className="flex-1" />
+    <div style={{ display: 'flex', height: '100vh', background: '#0f1117', color: 'white' }}>
+      <div ref={mapRef} style={{ flex: 1 }} />
 
-      {/* sidebar */}
-      <div className="w-72 bg-gray-800 p-4 flex flex-col gap-3 overflow-y-auto">
-        <h1 className="text-xl font-bold text-blue-400">
-          Swarm GCS
-        </h1>
-        <p className="text-xs text-gray-400">
-          {selected !== null
-            ? `Click map to send GOTO → Drone ${selected}`
-            : 'Click a drone to select it'}
-        </p>
+      <div style={{
+        width: 288,
+        background: '#0f1117',
+        padding: 16,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        overflowY: 'auto',
+      }}>
+        <div>
+          <h1 style={{ fontSize: 18, fontWeight: 700, color: '#3b82f6', margin: 0, marginBottom: 4 }}>
+            Swarm GCS
+          </h1>
+          <p style={{ fontSize: 11, color: '#6b7280', margin: 0 }}>
+            {selected !== null
+              ? `Click map to send GOTO → Drone ${selected}`
+              : 'Click a drone to select it'}
+          </p>
+        </div>
 
         <button
           type="button"
@@ -181,37 +205,77 @@ useEffect(() => {
         </button>
 
         {spawnStatus && (
-          <p className="text-xs text-gray-300">
-            {spawnStatus}
-          </p>
+          <p className="text-xs text-gray-300">{spawnStatus}</p>
         )}
 
-        {drones.map(d => (
-          <div
-            key={d.id}
-            onClick={() => setSelected(d.id)}
-            className={`p-3 rounded-lg cursor-pointer border transition-all ${
-              selected === d.id
-                ? 'border-green-400 bg-gray-700'
-                : 'border-gray-600 bg-gray-750 hover:border-gray-400'
-            }`}
-          >
-            <div className="flex justify-between items-center mb-1">
-              <span className="font-bold">Drone {d.id}</span>
-              <span className="text-xs text-gray-400">
-                {modeLabel(d.mode)}
-              </span>
-            </div>
-            <div className="text-xs text-gray-300 space-y-1">
-              <div>Heading: <span className="text-white">{d.heading.toFixed(1)}°</span></div>
-              <div>Battery: <span className="text-white">{d.battery.toFixed(1)}%</span></div>
-              <div>Alt: <span className="text-white">{d.z.toFixed(1)}m</span></div>
-              <div className="text-gray-500">
-                x:{d.x.toFixed(1)} y:{d.y.toFixed(1)}
+        {drones.map(d => {
+          const sel = selected === d.id
+          const armed = isArmed(d.mode)
+          const hist = altHistory.current.get(d.id) ?? []
+          return (
+            <div
+              key={d.id}
+              onClick={() => setSelected(d.id)}
+              style={{
+                background: '#1a1d27',
+                border: `1px solid ${sel ? '#3b82f6' : '#2a2d3a'}`,
+                boxShadow: sel ? '0 0 8px rgba(59,130,246,0.4)' : 'none',
+                borderRadius: 8,
+                padding: 12,
+                cursor: 'pointer',
+                transition: 'border-color 0.15s, box-shadow 0.15s',
+              }}
+            >
+              {/* header */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ fontWeight: 700, fontSize: 14 }}>Drone {d.id}</span>
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  fontSize: 10,
+                  fontFamily: 'monospace',
+                  background: '#0f1117',
+                  borderRadius: 999,
+                  padding: '2px 8px',
+                  color: armed ? '#22c55e' : '#9ca3af',
+                }}>
+                  <span style={{
+                    width: 6, height: 6, borderRadius: '50%',
+                    background: armed ? '#22c55e' : '#6b7280',
+                    display: 'inline-block',
+                  }} />
+                  {modeLabel(d.mode)}
+                </span>
               </div>
+
+              {/* stats */}
+              <div style={{ fontSize: 12, color: '#9ca3af', display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <HeadingArrow heading={d.heading} />
+                  <span>Heading: <span style={{ color: 'white' }}>{d.heading.toFixed(1)}°</span></span>
+                </div>
+                <div>Battery: <span style={{ color: 'white' }}>{d.battery.toFixed(1)}%</span></div>
+                <div>Alt: <span style={{ color: 'white' }}>{d.z.toFixed(1)}m</span></div>
+                <div style={{ color: '#4b5563' }}>x:{d.x.toFixed(1)} y:{d.y.toFixed(1)}</div>
+              </div>
+
+              {/* battery bar */}
+              <div style={{ height: 4, background: '#2a2d3a', borderRadius: 2, marginBottom: 8, overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%',
+                  width: `${Math.min(100, Math.max(0, d.battery))}%`,
+                  background: batteryColor(d.battery),
+                  borderRadius: 2,
+                  transition: 'width 0.3s, background 0.3s',
+                }} />
+              </div>
+
+              {/* altitude sparkline */}
+              <Sparkline data={hist} />
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
