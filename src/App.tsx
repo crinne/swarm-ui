@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { apiUrl, spawnDrone } from './api'
+import { fpvMetrics } from './fpv'
 
 const ORIGIN_LAT = 59.4370
 const ORIGIN_LNG = 24.7536
@@ -15,6 +16,16 @@ interface Drone {
   heading: number
   battery: number
   mode: number
+  vx: number
+  vy: number
+  vz: number
+}
+
+interface TelemetryPoint {
+  x: number
+  y: number
+  z: number
+  time: number
 }
 
 function nedToLatLng(x: number, y: number) {
@@ -71,13 +82,66 @@ function Sparkline({ data }: { data: number[] }) {
   )
 }
 
+function FpvPanel({ drone, enabled }: { drone?: Drone, enabled: boolean }) {
+  if (!enabled) return null
+
+  if (!drone) {
+    return (
+      <div className="fpv-panel">
+        <div className="fpv-topline">
+          <span>FPV</span>
+          <span className="fpv-alert">SIGNAL LOST</span>
+        </div>
+        <div className="fpv-offline">NO TELEMETRY</div>
+      </div>
+    )
+  }
+
+  const metrics = fpvMetrics(drone)
+  return (
+    <div className="fpv-panel">
+      <div className="fpv-topline">
+        <span>DRONE {drone.id} FPV</span>
+        <span className={metrics.lowBattery ? 'fpv-alert' : 'fpv-live'}>{metrics.lowBattery ? 'LOW BAT' : 'LIVE'}</span>
+      </div>
+
+      <div className="fpv-viewport">
+        <div
+          className="fpv-horizon"
+          style={{
+            transform: `translate(-50%, calc(-50% + ${metrics.horizonOffset}px)) rotate(${metrics.horizonTilt}deg)`,
+          }}
+        >
+          <div className="fpv-sky" />
+          <div className="fpv-ground" />
+        </div>
+        <div className="fpv-ladder fpv-ladder-left" />
+        <div className="fpv-ladder fpv-ladder-right" />
+        <div className="fpv-crosshair">
+          <span />
+          <span />
+        </div>
+        <div className="fpv-heading">{metrics.headingLabel}</div>
+      </div>
+
+      <div className="fpv-readouts">
+        <span>SPD {metrics.speedLabel}</span>
+        <span>ALT {metrics.altitudeLabel}</span>
+        <span>BAT {metrics.batteryLabel}</span>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const mapRef     = useRef<HTMLDivElement>(null)
   const mapObj     = useRef<maplibregl.Map | null>(null)
   const markers    = useRef<Map<number, maplibregl.Marker>>(new Map())
   const altHistory = useRef<Map<number, number[]>>(new Map())
+  const lastTelemetry = useRef<Map<number, TelemetryPoint>>(new Map())
   const [drones, setDrones] = useState<Drone[]>([])
   const [selected, setSelected] = useState<number | null>(null)
+  const [fpvEnabled, setFpvEnabled] = useState(false)
   const [spawnStatus, setSpawnStatus] = useState<string | null>(null)
 
   useEffect(() => {
@@ -118,13 +182,27 @@ export default function App() {
     const es = new EventSource(apiUrl('/telemetry'))
     es.onmessage = (e) => {
       const data = JSON.parse(e.data)
-      data.drones.forEach((d: Drone) => {
+      const now = performance.now()
+      const nextDrones = data.drones.map((d: Omit<Drone, 'vx' | 'vy' | 'vz'>) => {
+        const previous = lastTelemetry.current.get(d.id)
+        const dt = previous ? Math.max((now - previous.time) / 1000, 0.001) : 0
+        const velocity = previous && dt > 0
+          ? {
+              vx: (d.x - previous.x) / dt,
+              vy: (d.y - previous.y) / dt,
+              vz: (d.z - previous.z) / dt,
+            }
+          : { vx: 0, vy: 0, vz: 0 }
+
         const hist = altHistory.current.get(d.id) ?? []
         hist.push(d.z)
         if (hist.length > ALT_BUFFER_SIZE) hist.shift()
         altHistory.current.set(d.id, hist)
+        lastTelemetry.current.set(d.id, { x: d.x, y: d.y, z: d.z, time: now })
+
+        return { ...d, ...velocity }
       })
-      setDrones(data.drones)
+      setDrones(nextDrones)
     }
     return () => es.close()
   }, [])
@@ -183,9 +261,16 @@ export default function App() {
     }
   }
 
+  const selectedDrone = selected === null
+    ? undefined
+    : drones.find(drone => drone.id === selected)
+
   return (
     <div style={{ display: 'flex', height: '100vh', background: '#0f1117', color: 'white' }}>
-      <div ref={mapRef} style={{ flex: 1 }} />
+      <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
+        <div ref={mapRef} style={{ position: 'absolute', inset: 0 }} />
+        <FpvPanel drone={selectedDrone} enabled={fpvEnabled && selected !== null} />
+      </div>
 
       <div style={{
         width: 288,
@@ -213,6 +298,15 @@ export default function App() {
           className="rounded-lg bg-blue-500 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-400"
         >
           Spawn Drone
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setFpvEnabled(value => !value)}
+          disabled={selected === null}
+          className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:border-gray-700 disabled:bg-gray-800 disabled:text-gray-500"
+        >
+          {fpvEnabled ? 'Close FPV' : 'Open FPV'}
         </button>
 
         {spawnStatus && (
